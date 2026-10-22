@@ -679,6 +679,8 @@ class _NotebookScreenState extends State<NotebookScreen>
               ),
               Material(
                 elevation: 2,
+                color: Colors.white,
+                surfaceTintColor: Colors.transparent,
                 child: SizedBox(
                   width: width,
                   child: PageCanvas(
@@ -1683,6 +1685,8 @@ class _BinTile extends StatelessWidget {
                           width: 400,
                           child: Material(
                             elevation: 1,
+                            color: Colors.white,
+                            surfaceTintColor: Colors.transparent,
                             child: PageCanvas(
                               page: page,
                               imageFile: page.imageFile == null
