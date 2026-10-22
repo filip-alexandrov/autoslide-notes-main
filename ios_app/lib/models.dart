@@ -27,6 +27,12 @@ class Stroke {
   final double width;
   final List<Offset> points;
 
+  void translate(Offset delta) {
+    for (var i = 0; i < points.length; i++) {
+      points[i] += delta;
+    }
+  }
+
   Rect get bounds {
     if (points.isEmpty) return Rect.zero;
     var minX = points.first.dx, maxX = minX;
@@ -182,6 +188,13 @@ class NotePage extends ChangeNotifier {
 
   void insertStrokes(Iterable<Stroke> toAdd) {
     strokes.addAll(toAdd);
+    notifyListeners();
+  }
+
+  void translateStrokes(List<Stroke> toMove, Offset delta) {
+    for (final s in toMove) {
+      s.translate(delta);
+    }
     notifyListeners();
   }
 

@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -6,7 +7,7 @@ import 'package:flutter/material.dart';
 import 'ink.dart';
 import 'models.dart';
 
-enum DrawTool { pen, highlighter, eraser }
+enum DrawTool { pen, highlighter, eraser, lasso }
 
 const double highlighterOpacity = 0.35;
 
@@ -81,6 +82,7 @@ class PageCanvas extends StatefulWidget {
     required this.settings,
     required this.onStrokeAdded,
     required this.onStrokesErased,
+    this.onStrokesMoved,
   });
 
   final NotePage page;
@@ -88,23 +90,63 @@ class PageCanvas extends StatefulWidget {
   final ToolSettings settings;
   final void Function(NotePage page, Stroke stroke) onStrokeAdded;
   final void Function(NotePage page, List<Stroke> strokes) onStrokesErased;
+  final void Function(NotePage page, List<Stroke> strokes, Offset delta)? onStrokesMoved;
 
   @override
   State<PageCanvas> createState() => _PageCanvasState();
 }
 
+enum _LassoMode { none, drawing, dragging }
+
 class _PageCanvasState extends State<PageCanvas> {
   final _active = _ActiveStroke();
+  final _lasso = _LassoState();
   int? _pointer;
   PointerDeviceKind? _pointerKind;
   bool _erasing = false;
   final List<Stroke> _erased = [];
   double _scale = 1;
 
+  _LassoMode _lassoMode = _LassoMode.none;
+  Offset _lastDragPage = Offset.zero;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.page.addListener(_onPageChanged);
+  }
+
   @override
   void dispose() {
+    widget.page.removeListener(_onPageChanged);
     _active.dispose();
+    _lasso.dispose();
     super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(PageCanvas old) {
+    super.didUpdateWidget(old);
+    if (old.page != widget.page) {
+      old.page.removeListener(_onPageChanged);
+      widget.page.addListener(_onPageChanged);
+      _lasso.clear();
+    } else if (old.settings.tool == DrawTool.lasso &&
+        widget.settings.tool != DrawTool.lasso) {
+      _lasso.clear();
+    }
+  }
+
+  void _onPageChanged() {
+    if (_lasso.hasSelection && _lassoMode != _LassoMode.dragging) {
+      final still =
+          _lasso.selected.where(widget.page.strokes.contains).toList();
+      if (still.isEmpty) {
+        _lasso.clear();
+      } else {
+        _lasso.updateSelection(still);
+      }
+    }
   }
 
   Offset _toPage(Offset local) => local / _scale;
@@ -114,8 +156,9 @@ class _PageCanvasState extends State<PageCanvas> {
   /// How much larger this page is than a fresh one (1 unless extended).
   double get _unitScale => widget.page.width / pageWidth;
 
+  // ---------------------------------------------------------------- pointer
+
   void _onDown(PointerDownEvent e) {
-    // A second finger while drawing with a finger means a pinch, not ink.
     if (_pointer != null &&
         _pointerKind == PointerDeviceKind.touch &&
         e.kind == PointerDeviceKind.touch) {
@@ -126,10 +169,12 @@ class _PageCanvasState extends State<PageCanvas> {
     _pointer = e.pointer;
     _pointerKind = e.kind;
     final p = _toPage(e.localPosition);
-    // The back end of the Apple Pencil (where supported) always erases.
-    _erasing =
-        widget.settings.tool == DrawTool.eraser ||
-        e.kind == PointerDeviceKind.invertedStylus;
+    final invertedStylus = e.kind == PointerDeviceKind.invertedStylus;
+    if (!invertedStylus && widget.settings.tool == DrawTool.lasso) {
+      _handleLassoDown(p);
+      return;
+    }
+    _erasing = widget.settings.tool == DrawTool.eraser || invertedStylus;
     if (_erasing) {
       _eraseAt(p);
     } else {
@@ -151,7 +196,9 @@ class _PageCanvasState extends State<PageCanvas> {
   void _onMove(PointerMoveEvent e) {
     if (e.pointer != _pointer) return;
     final p = _toPage(e.localPosition);
-    if (_erasing) {
+    if (_lassoMode != _LassoMode.none) {
+      _handleLassoMove(p);
+    } else if (_erasing) {
       _eraseAt(p);
     } else {
       _active.add(p);
@@ -160,13 +207,27 @@ class _PageCanvasState extends State<PageCanvas> {
 
   void _onUp(PointerUpEvent e) {
     if (e.pointer != _pointer) return;
-    // End exactly where the pen lifted, not at the lagging smoothed point.
+    if (_lassoMode != _LassoMode.none) {
+      _handleLassoUp(_toPage(e.localPosition));
+      _pointer = null;
+      return;
+    }
     if (!_erasing) _active.end(_toPage(e.localPosition));
     _finish(commit: true);
   }
 
   void _onCancel(PointerCancelEvent e) {
     if (e.pointer != _pointer) return;
+    if (_lassoMode != _LassoMode.none) {
+      if (_lassoMode == _LassoMode.drawing) {
+        _lasso.clear();
+      } else {
+        _lasso.updateDrag(Offset.zero);
+      }
+      _lassoMode = _LassoMode.none;
+      _pointer = null;
+      return;
+    }
     _finish(commit: false);
   }
 
@@ -186,6 +247,8 @@ class _PageCanvasState extends State<PageCanvas> {
       widget.onStrokeAdded(widget.page, stroke);
     }
   }
+
+  // ---------------------------------------------------------------- eraser
 
   void _eraseAt(Offset p) {
     final r = widget.settings.eraserRadius * _unitScale;
@@ -218,6 +281,86 @@ class _PageCanvasState extends State<PageCanvas> {
     return (p - (a + ab * t)).distance;
   }
 
+  // ---------------------------------------------------------------- lasso
+
+  void _handleLassoDown(Offset p) {
+    if (_lasso.hasSelection) {
+      final bounds = _lasso.selectionBounds;
+      if (bounds.inflate(10).contains(p)) {
+        _lassoMode = _LassoMode.dragging;
+        _lastDragPage = p;
+        return;
+      }
+    }
+    _lasso.clear();
+    _lassoMode = _LassoMode.drawing;
+    _lasso.startPath(p);
+  }
+
+  void _handleLassoMove(Offset p) {
+    if (_lassoMode == _LassoMode.drawing) {
+      _lasso.addPoint(p);
+    } else if (_lassoMode == _LassoMode.dragging) {
+      final delta = p - _lastDragPage;
+      _lasso.updateDrag(_lasso.dragOffset + delta);
+      _lastDragPage = p;
+    }
+  }
+
+  void _handleLassoUp(Offset p) {
+    if (_lassoMode == _LassoMode.drawing) {
+      final polygon = List<Offset>.of(_lasso.path);
+      if (polygon.length >= 3) {
+        final selected = <Stroke>[];
+        for (final s in widget.page.strokes) {
+          if (_strokeIntersectsPolygon(s, polygon)) selected.add(s);
+        }
+        if (selected.isNotEmpty) {
+          _lasso.finishSelection(selected);
+        } else {
+          _lasso.clear();
+        }
+      } else {
+        _lasso.clear();
+      }
+    } else if (_lassoMode == _LassoMode.dragging) {
+      final offset = _lasso.dragOffset;
+      if (offset.distance > 0.5) {
+        widget.page.translateStrokes(_lasso.selected, offset);
+        _lasso.commitDrag();
+        widget.onStrokesMoved
+            ?.call(widget.page, List.of(_lasso.selected), offset);
+      } else {
+        _lasso.updateDrag(Offset.zero);
+      }
+    }
+    _lassoMode = _LassoMode.none;
+  }
+
+  static bool _strokeIntersectsPolygon(Stroke stroke, List<Offset> polygon) {
+    for (final p in stroke.points) {
+      if (_pointInPolygon(p, polygon)) return true;
+    }
+    return false;
+  }
+
+  static bool _pointInPolygon(Offset point, List<Offset> polygon) {
+    var inside = false;
+    for (var i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      if ((polygon[i].dy > point.dy) != (polygon[j].dy > point.dy) &&
+          point.dx <
+              (polygon[j].dx - polygon[i].dx) *
+                      (point.dy - polygon[i].dy) /
+                      (polygon[j].dy - polygon[i].dy) +
+                  polygon[i].dx) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+
+  // ---------------------------------------------------------------- build
+
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
@@ -233,7 +376,6 @@ class _PageCanvasState extends State<PageCanvas> {
           onPointerMove: _onMove,
           onPointerUp: _onUp,
           onPointerCancel: _onCancel,
-          // Clip ink that ends up outside the page after space is removed.
           child: ClipRect(
             child: SizedBox(
               width: width,
@@ -253,16 +395,17 @@ class _PageCanvasState extends State<PageCanvas> {
                       child: Image.file(
                         widget.imageFile!,
                         fit: BoxFit.fill,
-                        // Bucketed so pinch-zooming doesn't re-decode
-                        // the image on every frame.
                         cacheWidth: _bucket(imageRect.width * _scale * dpr),
                         gaplessPlayback: true,
                       ),
                     ),
                   RepaintBoundary(
-                    child: CustomPaint(painter: _StrokesPainter(page, _scale)),
+                    child: CustomPaint(
+                      painter: _StrokesPainter(page, _scale, _lasso),
+                    ),
                   ),
                   CustomPaint(painter: _ActivePainter(_active, _scale)),
+                  CustomPaint(painter: _LassoPainter(_lasso, _scale)),
                 ],
               ),
             ),
@@ -317,29 +460,108 @@ class _ActiveStroke extends ChangeNotifier {
   }
 }
 
+class _LassoState extends ChangeNotifier {
+  final List<Offset> path = [];
+  List<Stroke> selected = [];
+  Rect selectionBounds = Rect.zero;
+  bool hasSelection = false;
+  Offset dragOffset = Offset.zero;
+
+  void startPath(Offset p) {
+    path.clear();
+    path.add(p);
+    notifyListeners();
+  }
+
+  void addPoint(Offset p) {
+    path.add(p);
+    notifyListeners();
+  }
+
+  void finishSelection(List<Stroke> strokes) {
+    path.clear();
+    selected = strokes;
+    selectionBounds = _boundsOf(strokes);
+    hasSelection = true;
+    dragOffset = Offset.zero;
+    notifyListeners();
+  }
+
+  void updateDrag(Offset offset) {
+    dragOffset = offset;
+    notifyListeners();
+  }
+
+  void commitDrag() {
+    selectionBounds = _boundsOf(selected);
+    dragOffset = Offset.zero;
+    notifyListeners();
+  }
+
+  void updateSelection(List<Stroke> strokes) {
+    selected = strokes;
+    selectionBounds = _boundsOf(strokes);
+    hasSelection = strokes.isNotEmpty;
+    notifyListeners();
+  }
+
+  void clear() {
+    path.clear();
+    selected = [];
+    selectionBounds = Rect.zero;
+    hasSelection = false;
+    dragOffset = Offset.zero;
+    notifyListeners();
+  }
+
+  static Rect _boundsOf(List<Stroke> strokes) {
+    if (strokes.isEmpty) return Rect.zero;
+    var r = strokes.first.bounds;
+    for (var i = 1; i < strokes.length; i++) {
+      r = r.expandToInclude(strokes[i].bounds);
+    }
+    return r;
+  }
+}
+
 class _StrokesPainter extends CustomPainter {
-  _StrokesPainter(this.page, this.scale) : super(repaint: page);
+  _StrokesPainter(this.page, this.scale, this.lasso)
+    : super(repaint: Listenable.merge([page, lasso]));
 
   final NotePage page;
   final double scale;
+  final _LassoState lasso;
 
   @override
   void paint(Canvas canvas, Size size) {
     canvas.save();
     canvas.scale(scale);
-    // Highlighter first so pen ink stays crisp on top of it.
+    final selectedSet =
+        lasso.hasSelection ? lasso.selected.toSet() : <Stroke>{};
+    final offset = lasso.dragOffset;
+    void paintMaybeOffset(Canvas canvas, Stroke s) {
+      if (selectedSet.contains(s) && offset != Offset.zero) {
+        canvas.save();
+        canvas.translate(offset.dx, offset.dy);
+        paintStroke(canvas, s);
+        canvas.restore();
+      } else {
+        paintStroke(canvas, s);
+      }
+    }
+
     for (final s in page.strokes) {
-      if (s.tool == StrokeTool.highlighter) paintStroke(canvas, s);
+      if (s.tool == StrokeTool.highlighter) paintMaybeOffset(canvas, s);
     }
     for (final s in page.strokes) {
-      if (s.tool == StrokeTool.pen) paintStroke(canvas, s);
+      if (s.tool == StrokeTool.pen) paintMaybeOffset(canvas, s);
     }
     canvas.restore();
   }
 
   @override
   bool shouldRepaint(_StrokesPainter old) =>
-      old.page != page || old.scale != scale;
+      old.page != page || old.scale != scale || old.lasso != lasso;
 }
 
 class _ActivePainter extends CustomPainter {
@@ -393,4 +615,88 @@ void paintStroke(Canvas canvas, Stroke s) {
         path.cubicTo(c1.dx, c1.dy, c2.dx, c2.dy, p.dx, p.dy),
   );
   canvas.drawPath(path, paint);
+}
+
+class _LassoPainter extends CustomPainter {
+  _LassoPainter(this.lasso, this.scale) : super(repaint: lasso);
+
+  final _LassoState lasso;
+  final double scale;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (lasso.path.length >= 2) _paintLassoPath(canvas);
+    if (lasso.hasSelection) _paintSelectionBox(canvas);
+  }
+
+  void _paintLassoPath(Canvas canvas) {
+    final path = Path();
+    final first = lasso.path.first;
+    path.moveTo(first.dx * scale, first.dy * scale);
+    for (final p in lasso.path.skip(1)) {
+      path.lineTo(p.dx * scale, p.dy * scale);
+    }
+    path.close();
+
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = const Color(0x0D2196F3)
+        ..style = PaintingStyle.fill,
+    );
+    _drawDashedPath(
+      canvas,
+      path,
+      Paint()
+        ..color = const Color(0xFF2196F3)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5,
+    );
+  }
+
+  void _paintSelectionBox(Canvas canvas) {
+    final bounds = lasso.selectionBounds.translate(
+      lasso.dragOffset.dx,
+      lasso.dragOffset.dy,
+    );
+    final screenBounds = Rect.fromLTRB(
+      bounds.left * scale,
+      bounds.top * scale,
+      bounds.right * scale,
+      bounds.bottom * scale,
+    );
+    final inflated = screenBounds.inflate(6);
+    final rrect = RRect.fromRectAndRadius(inflated, const Radius.circular(4));
+
+    canvas.drawRRect(
+      rrect,
+      Paint()
+        ..color = const Color(0x0D2196F3)
+        ..style = PaintingStyle.fill,
+    );
+    _drawDashedPath(
+      canvas,
+      Path()..addRRect(rrect),
+      Paint()
+        ..color = const Color(0xFF2196F3)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5,
+    );
+  }
+
+  static void _drawDashedPath(Canvas canvas, Path path, Paint paint,
+      {double dashLen = 6, double gapLen = 4}) {
+    for (final metric in path.computeMetrics()) {
+      var distance = 0.0;
+      while (distance < metric.length) {
+        final end = math.min(distance + dashLen, metric.length);
+        canvas.drawPath(metric.extractPath(distance, end), paint);
+        distance += dashLen + gapLen;
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_LassoPainter old) =>
+      old.lasso != lasso || old.scale != scale;
 }

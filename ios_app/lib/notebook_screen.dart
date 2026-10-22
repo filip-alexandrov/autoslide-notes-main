@@ -657,6 +657,8 @@ class _NotebookScreenState extends State<NotebookScreen>
                     settings: _settings,
                     onStrokeAdded: (p, s) => _recordEdit(_Edit.add(p, [s])),
                     onStrokesErased: (p, s) => _recordEdit(_Edit.erase(p, s)),
+                    onStrokesMoved: (p, strokes, delta) =>
+                        _recordEdit(_Edit.moveStrokes(p, strokes, delta)),
                   ),
                 ),
               ),
@@ -772,6 +774,7 @@ class _NotebookScreenState extends State<NotebookScreen>
                 'Highlighter',
               ),
               toolButton(DrawTool.eraser, Icons.auto_fix_normal, 'Eraser'),
+              toolButton(DrawTool.lasso, Icons.highlight_alt, 'Lasso select'),
             ],
           ),
           // Colors and widths belong to the highlighter while it is selected,
@@ -1012,6 +1015,12 @@ class _Edit {
 
   _Edit.extend(NotePage page, PageSide side, double amount)
     : this._(() => page.extend(side, amount), () => page.extend(side, -amount));
+
+  _Edit.moveStrokes(NotePage page, List<Stroke> strokes, Offset delta)
+    : this._(
+        () => page.translateStrokes(strokes, delta),
+        () => page.translateStrokes(strokes, -delta),
+      );
 
   final VoidCallback apply;
   final VoidCallback revert;
