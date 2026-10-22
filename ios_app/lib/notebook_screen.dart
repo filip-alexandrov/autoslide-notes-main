@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -39,7 +40,7 @@ const double _compactMaxWidth = 600;
 const double _minZoom = 0.5;
 const double _maxZoom = 4;
 
-const _penColors = <int>[
+const _defaultPenColors = <int>[
   0xFF1A1A1A, // black
   0xFF1E5EFF, // blue
   0xFFE53935, // red
@@ -47,13 +48,16 @@ const _penColors = <int>[
   0xFF8E24AA, // purple
 ];
 
-const _highlighterColors = <int>[
+const _defaultHighlighterColors = <int>[
   0xFFFFD600, // yellow
   0xFF76FF03, // green
   0xFFFF4081, // pink
   0xFF40C4FF, // blue
   0xFFFF9100, // orange
 ];
+
+const _penPaletteKey = 'penPalette';
+const _highlighterPaletteKey = 'highlighterPalette';
 
 /// Width choices (page units) and the dot size shown for each.
 const _penWidths = <(double, double)>[(2, 5), (3, 8), (6, 13)];
@@ -84,6 +88,8 @@ class _NotebookScreenState extends State<NotebookScreen>
 
   final _scroll = ScrollController();
   ToolSettings _settings = const ToolSettings();
+  List<int> _penPalette = List.of(_defaultPenColors);
+  List<int> _highlighterPalette = List.of(_defaultHighlighterColors);
 
   /// Tool to return to when a Pencil double-tap leaves the eraser.
   DrawTool _toolBeforeEraser = DrawTool.pen;
@@ -123,8 +129,16 @@ class _NotebookScreenState extends State<NotebookScreen>
     if (!mounted) return;
     final smoothing = Smoothing.values
         .asNameMap()[prefs.getString(_smoothingKey)];
+    final savedPen = prefs.getStringList(_penPaletteKey);
+    final savedHl = prefs.getStringList(_highlighterPaletteKey);
     setState(() {
       _prefs = prefs;
+      if (savedPen != null && savedPen.length == 5) {
+        _penPalette = savedPen.map((s) => int.tryParse(s) ?? 0).toList();
+      }
+      if (savedHl != null && savedHl.length == 5) {
+        _highlighterPalette = savedHl.map((s) => int.tryParse(s) ?? 0).toList();
+      }
       if (smoothing != null) {
         _settings = _settings.copyWith(smoothing: smoothing);
       }
@@ -491,6 +505,25 @@ class _NotebookScreenState extends State<NotebookScreen>
     doc.markDirty();
   }
 
+  void _savePalette() {
+    _prefs?.setStringList(
+      _penPaletteKey,
+      _penPalette.map((c) => c.toString()).toList(),
+    );
+    _prefs?.setStringList(
+      _highlighterPaletteKey,
+      _highlighterPalette.map((c) => c.toString()).toList(),
+    );
+  }
+
+  void _resetColors() {
+    setState(() {
+      _penPalette = List.of(_defaultPenColors);
+      _highlighterPalette = List.of(_defaultHighlighterColors);
+    });
+    _savePalette();
+  }
+
   void _showError(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
@@ -777,12 +810,11 @@ class _NotebookScreenState extends State<NotebookScreen>
               toolButton(DrawTool.lasso, Icons.highlight_alt, 'Lasso select'),
             ],
           ),
-          // Colors and widths belong to the highlighter while it is selected,
-          // otherwise to the pen (picking one from the eraser switches to pen).
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              for (final c in s.isHighlighter ? _highlighterColors : _penColors)
+              for (final c
+                  in s.isHighlighter ? _highlighterPalette : _penPalette)
                 _ColorSwatch(
                   color: c,
                   selected:
@@ -793,6 +825,30 @@ class _NotebookScreenState extends State<NotebookScreen>
                         : s.copyWith(penColor: c, tool: DrawTool.pen),
                   ),
                 ),
+              _ColorPickerButton(
+                currentColor:
+                    s.isHighlighter ? s.highlighterColor : s.penColor,
+                onColorPicked: (color) => setState(
+                  () => _settings = s.isHighlighter
+                      ? s.copyWith(highlighterColor: color)
+                      : s.copyWith(penColor: color, tool: DrawTool.pen),
+                ),
+                palette:
+                    s.isHighlighter ? _highlighterPalette : _penPalette,
+                defaults: s.isHighlighter
+                    ? _defaultHighlighterColors
+                    : _defaultPenColors,
+                onPaletteChanged: (colors) {
+                  setState(() {
+                    if (s.isHighlighter) {
+                      _highlighterPalette = colors;
+                    } else {
+                      _penPalette = colors;
+                    }
+                  });
+                  _savePalette();
+                },
+              ),
             ],
           ),
           Row(
@@ -916,6 +972,8 @@ class _NotebookScreenState extends State<NotebookScreen>
                 _rename();
               case 'bin':
                 _openRecycleBin();
+              case 'resetColors':
+                _resetColors();
             }
           },
           itemBuilder: (_) => [
@@ -925,6 +983,10 @@ class _NotebookScreenState extends State<NotebookScreen>
               child: const Text('Draw with finger'),
             ),
             const PopupMenuDivider(),
+            const PopupMenuItem(
+              value: 'resetColors',
+              child: Text('Reset palette colors'),
+            ),
             PopupMenuItem(
               value: 'bin',
               child: Text(
@@ -1201,17 +1263,169 @@ class _ColorSwatch extends StatelessWidget {
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
+      child: SizedBox(
+        width: 30,
+        height: 36,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              width: 24,
+              height: 24,
+              decoration: BoxDecoration(
+                color: Color(color),
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.black26, width: 1),
+              ),
+            ),
+            const SizedBox(height: 2),
+            Container(
+              width: 5,
+              height: 5,
+              decoration: BoxDecoration(
+                color: selected ? Colors.black87 : Colors.transparent,
+                shape: BoxShape.circle,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ColorPickerButton extends StatelessWidget {
+  const _ColorPickerButton({
+    required this.currentColor,
+    required this.onColorPicked,
+    required this.palette,
+    required this.defaults,
+    required this.onPaletteChanged,
+  });
+
+  final int currentColor;
+  final ValueChanged<int> onColorPicked;
+  final List<int> palette;
+  final List<int> defaults;
+  final ValueChanged<List<int>> onPaletteChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () => _openPicker(context),
       child: Container(
-        width: 26,
-        height: 26,
-        margin: const EdgeInsets.symmetric(horizontal: 3),
+        width: 24,
+        height: 24,
+        margin: const EdgeInsets.only(left: 4),
         decoration: BoxDecoration(
-          color: Color(color),
           shape: BoxShape.circle,
-          border: Border.all(
-            color: selected ? Colors.black : Colors.black26,
-            width: selected ? 3 : 1,
+          gradient: const SweepGradient(
+            colors: [
+              Color(0xFFFF0000),
+              Color(0xFFFFFF00),
+              Color(0xFF00FF00),
+              Color(0xFF00FFFF),
+              Color(0xFF0000FF),
+              Color(0xFFFF00FF),
+              Color(0xFFFF0000),
+            ],
           ),
+          border: Border.all(color: Colors.black26, width: 1),
+        ),
+      ),
+    );
+  }
+
+  void _openPicker(BuildContext context) {
+    var picked = Color(currentColor);
+    final localPalette = List<int>.of(palette);
+
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Pick a color'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ColorPicker(
+                  pickerColor: picked,
+                  onColorChanged: (c) =>
+                      setDialogState(() => picked = c),
+                  enableAlpha: false,
+                  hexInputBar: true,
+                  labelTypes: const [],
+                  pickerAreaHeightPercent: 0.7,
+                ),
+                const SizedBox(height: 16),
+                const Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    'Save to palette slot:',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    for (var i = 0; i < localPalette.length; i++)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                        child: GestureDetector(
+                          onTap: () {
+                            setDialogState(
+                              () => localPalette[i] = picked.toARGB32(),
+                            );
+                          },
+                          child: Container(
+                            width: 32,
+                            height: 32,
+                            decoration: BoxDecoration(
+                              color: Color(localPalette[i]),
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: Colors.black26,
+                                width: 1,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                TextButton(
+                  onPressed: () {
+                    setDialogState(() {
+                      for (var i = 0; i < defaults.length; i++) {
+                        localPalette[i] = defaults[i];
+                      }
+                    });
+                  },
+                  child: const Text('Restore default colors'),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                onColorPicked(picked.toARGB32());
+                onPaletteChanged(localPalette);
+                Navigator.pop(ctx);
+              },
+              child: const Text('Use color'),
+            ),
+          ],
         ),
       ),
     );
